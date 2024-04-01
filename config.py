@@ -87,7 +87,7 @@ stop_integral_windup = True
 ########################################################################
 #
 #   Simulation parameters
-simulate = True
+simulate = False
 sim_t_env      = 60.0   # deg C
 sim_c_heat     = 500.0  # J/K  heat capacity of heat element
 sim_c_oven     = 5000.0 # J/K  heat capacity of oven
@@ -128,7 +128,8 @@ kiln_must_catch_up = True
 # or 100% off because the kiln is too hot. No integral builds up
 # outside the window. The bigger you make the window, the more
 # integral you will accumulate. This should be a positive integer.
-pid_control_window = 5 #degrees 
+#pid_control_window = 5 #degrees 
+pid_control_window = 1000 #degrees 
 
 # thermocouple offset
 # If you put your thermocouple in ice water and it reads 36F, you can
@@ -158,7 +159,8 @@ ac_freq_50hz = False
 ignore_temp_too_high = False
 ignore_lost_connection_tc = False
 ignore_unknown_tc_error = False
-ignore_too_many_tc_errors = False
+# ignore_too_many_tc_errors = False
+ignore_too_many_tc_errors = True 
 # some kilns/thermocouples start erroneously reporting "short" 
 # errors at higher temperatures due to plasma forming in the kiln.
 # Set this to True to ignore these errors and assume the temperature 
