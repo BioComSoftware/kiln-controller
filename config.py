@@ -1,8 +1,7 @@
 import logging
 import os
-
-# uncomment this if using MAX-31856
-#from lib.max31856 import MAX31856
+from digitalio import DigitalInOut
+import busio
 
 ########################################################################
 #
@@ -21,37 +20,67 @@ listening_port = 8081
 # This is used to calculate a cost estimate before a run. It's also used
 # to produce the actual cost during a run. My kiln has three
 # elements that when my switches are set to high, consume 9460 watts.
-
 kwh_rate        = 0.1319  # cost per kilowatt hour per currency_type to calculate cost to run job
 kw_elements     = 9.460 # if the kiln elements are on, the wattage in kilowatts
 currency_type   = "$"   # Currency Symbol to show when calculating cost to run job
 
 ########################################################################
 #
-#   GPIO Setup (BCM SoC Numbering Schema)
+# Hardware Setup (uses BCM Pin Numbering)
 #
-#   Check the RasPi docs to see where these GPIOs are
-#   connected on the P1 header for your board type/rev.
-#   These were tested on a Pi B Rev2 but of course you
-#   can use whichever GPIO you prefer/have available.
-
-### Outputs
-gpio_heat = 23  # Switches zero-cross solid-state-relay
+# kiln-controller.py uses SPI interface from the blinka library to read
+# temperature data from the adafruit-31855 or adafruit-31856.
+# Blinka supports many different boards. I've only tested raspberry pi.
+#
+# SPI uses 3 or 4 pins. On the raspberry pi, you MUST use predefined
+# pins. In the case of the adafruit-31855, only 3 pins are used:
+#
+#    SPI0_SCLK = BCM pin 11 = CLK on the adafruit-31855
+#    SPI0_MOSI = BCM pin 10 = not connected
+#    SPI0_MISO = BCM pin 9  = D0 on the adafruit-31855
+#   
+# plus a GPIO output to connect to CS. You can use any GPIO pin you want.
+# I chose gpio pin 5:
+#
+#    GPIO5    = BCM pin 5   = CS on the adafruit-31855
+#
+# To control the kiln, one gpio pin is used as an output. Pick any 
+# you like. I chose gpio pin 23. This output is used to control a
+# zero-cross solid-state-relay.
+try:
+    import board
+    spi_sclk  = board.D11 #spi clock
+    spi_mosi  = board.D10 #spi Microcomputer Out Serial In (not connected) 
+    spi_miso  = board.D9  #spi Microcomputer In Serial Out
+    spi_cs    = board.D5  #spi Chip Select
+    gpio_heat = board.D23 #output that controls relay
+except NotImplementedError:
+    print("not running on blinka recognized board, probably a simulation")
 
 ### Thermocouple Adapter selection:
 #   max31855 - bitbang SPI interface
 #   max31856 - bitbang SPI interface. must specify thermocouple_type.
 max31855 = 1
 max31856 = 0
-# see lib/max31856.py for other thermocouple_type, only applies to max31856
 # uncomment this if using MAX-31856
-#thermocouple_type = MAX31856.MAX31856_S_TYPE
+#thermocouple_type = ThermocoupleType.S
 
-### Thermocouple Connection (using bitbang interfaces)
-gpio_sensor_cs = 27
-gpio_sensor_clock = 22
-gpio_sensor_data = 17
-gpio_sensor_di = 10 # only used with max31856
+# here are the possible max-31856 thermocouple types
+#   ThermocoupleType.B
+#   ThermocoupleType.E
+#   ThermocoupleType.J
+#   ThermocoupleType.K
+#   ThermocoupleType.N
+#   ThermocoupleType.R
+#   ThermocoupleType.S
+#   ThermocoupleType.T
+
+########################################################################
+#
+# If your kiln is above the scheduled starting temperature when you click the Start button this
+# feature will start the schedule at that temperature.
+#
+seek_start = True
 
 ########################################################################
 #
@@ -75,7 +104,6 @@ pid_kp = 25   # Proportional 25,200,200
 pid_ki = 10   # Integral
 pid_kd = 200  # Derivative
 
-
 ########################################################################
 #
 # Initial heating and Integral Windup
@@ -96,6 +124,7 @@ sim_R_o_nocool = 0.5   # K/W  thermal resistance oven -> environment
 sim_R_o_cool   = 0.05   # K/W  " with cooling
 sim_R_ho_noair = 0.1    # K/W  thermal resistance heat element -> oven
 sim_R_ho_air   = 0.05   # K/W  " with internal air circulation
+sim_speedup_factor = 1000
 
 
 ########################################################################
@@ -104,7 +133,6 @@ sim_R_ho_air   = 0.05   # K/W  " with internal air circulation
 #
 # If you change the temp_scale, all settings in this file are assumed to
 # be in that scale.
-
 temp_scale          = "f" # c = Celsius | f = Fahrenheit - Unit to display
 time_scale_slope    = "h" # s = Seconds | m = Minutes | h = Hours - Slope displayed in temp_scale per time_scale_slope
 time_scale_profile  = "m" # s = Seconds | m = Minutes | h = Hours - Enter and view target time in time_scale_profile
@@ -137,10 +165,10 @@ pid_control_window = 1000 #degrees
 # cheap thermocouple.  Invest in a better thermocouple.
 thermocouple_offset=0
 
-# number of samples of temperature to average.
-# If you suffer from the high temperature kiln issue and have set 
-# honour_theromocouple_short_errors to False,
-# you will likely need to increase this (eg I use 40)
+# number of samples of temperature to take over each duty cycle.
+# The larger the number, the more load on the board. K type 
+# thermocouples have a precision of about 1/2 degree C. 
+# The median of these samples is used for the temperature.
 temperature_average_samples = 40 
 
 # Thermocouple AC frequency filtering - set to True if in a 50Hz locale, else leave at False for 60Hz locale
@@ -155,7 +183,10 @@ ac_freq_50hz = False
 # - unknown error with thermocouple
 # - too many errors in a short period from thermocouple
 # but in some cases, you might want to ignore a specific error, log it,
-# and continue running your profile.
+# and continue running your profile instead of having the process die.
+#
+# You should only set these to True if you experience a problem
+# and WANT to ignore it to complete a firing.
 ignore_temp_too_high = False
 ignore_lost_connection_tc = False
 ignore_unknown_tc_error = False
@@ -165,7 +196,20 @@ ignore_too_many_tc_errors = True
 # errors at higher temperatures due to plasma forming in the kiln.
 # Set this to True to ignore these errors and assume the temperature 
 # reading was correct anyway
+ignore_tc_lost_connection = False
+ignore_tc_cold_junction_range_error = False
+ignore_tc_range_error = False
+ignore_tc_cold_junction_temp_high = False
+ignore_tc_cold_junction_temp_low = False
+ignore_tc_temp_high = False
+ignore_tc_temp_low = False
+ignore_tc_voltage_error = False
 ignore_tc_short_errors = False 
+ignore_tc_unknown_error = False
+
+# This overrides all possible thermocouple errors and prevents the 
+# process from exiting.
+ignore_tc_too_many_errors = False #333 what is the difference between this and ignore_too_many_tc_errors
 
 ########################################################################
 # automatic restarts - if you have a power brown-out and the raspberry pi
